@@ -1,0 +1,280 @@
+---
+title: "Study 4 - Information seeking - binomial GLMM"
+author: "Christoph Völter"
+date: "22/01/2022"
+output: 
+  html_document:
+    theme: united
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls(all.names = TRUE))
+library(tidyverse)
+library(cowplot)
+library("gghalves")
+
+load("power_sim_study4_N68.RData.RData")
+```
+
+## Generate data
+
+```{r echo=FALSE, include=FALSE}
+
+set.seed(1)
+n.subject <- 68 # number subjects
+n.per.subject <- 24 # observations per subject
+n.per.condition <- 12 # observations per subject and condition
+subj.id <- as.factor(paste("subj", 1:n.subject, sep = "."))
+age_range <- c(12:130) # age range between 1 and 13 years
+clear.per <- c(0.1, 0.2) # performance in clear condition
+opaque.per <- c(0.35, 0.45) # performance in opaque condition
+
+start.data <- data.frame(subj.id)
+# duplicate rows according to the number obs. per subject:
+start.data <- start.data[rep(x = 1:nrow(start.data), times = n.per.subject), ]
+start.data <- as.data.frame(start.data)
+names(start.data) <- "subj.id"
+
+
+# add condition and trial number
+
+
+start.data <- data.frame(expand.grid(subj.id = c(1:n.subject), condition = c("clear", "opaque"), trial = c(1:n.per.condition)))
+
+#add session
+start.data$block <- ifelse(start.data$subj.id<=(n.subject/2) & start.data$trial<7 & start.data$condition=="clear", 1, ifelse(start.data$subj.id<=(n.subject/2) & start.data$trial>=7 & start.data$condition=="clear", 4, ifelse(start.data$subj.id<=(n.subject/2) & start.data$trial<7 & start.data$condition=="opaque", 2,ifelse(start.data$subj.id<=(n.subject/2) & start.data$trial>=7 & start.data$condition=="opaque", 3, ifelse(start.data$subj.id>(n.subject/2) & start.data$trial<7 & start.data$condition=="clear", 2, ifelse(start.data$subj.id>(n.subject/2) & start.data$trial>=7 & start.data$condition=="clear", 3, ifelse(start.data$subj.id>(n.subject/2) & start.data$trial<7 & start.data$condition=="opaque", 1,ifelse(start.data$subj.id>(n.subject/2) & start.data$trial>=7 & start.data$condition=="opaque", 4, ""))))))))
+
+
+start.data$subj.id <- as.factor(paste("subj", start.data$subj.id, sep = "."))
+start.data<-start.data%>%arrange(subj.id, block, trial)
+
+start.data$sex<-rep(c(rep("f",24), rep("m", 24)), n.subject/2)
+                  
+             
+#add trial w/ block
+start.data$trial_w_block <- ifelse(start.data$trial<7, start.data$trial, ifelse(start.data$trial>=7, start.data$trial-6, ""))
+
+
+
+# z-transformation of covariates
+start.data$z.trial <- as.vector(scale(as.numeric(start.data$trial_w_block)))
+start.data$z.block <- as.vector(scale(as.numeric(start.data$block)))
+
+# dummy code factors
+start.data$condition.dummy <- as.numeric(start.data$condition == levels(start.data$condition)[2])
+#start.data$order.dummy <- as.numeric(start.data$order == levels(start.data$order)[2])
+
+# center condition for random slopes:
+start.data$condition.c <- as.numeric(start.data$condition) - mean(as.numeric(start.data$condition))
+#start.data$order.c <- as.numeric(start.data$order) - mean(as.numeric(start.data$order))
+
+# checks:
+# does each subject have only one sex and age?
+xx <- table(start.data$subj.id, start.data$sex)
+range(apply(X = xx > 0, MARGIN = 1, sum)) # should be 1 and 1
+
+xx <- table(start.data$subj.id, start.data$condition)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+
+xx <- table(start.data$subj.id, start.data$trial)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+
+xx <- table(start.data$condition, start.data$block)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+
+xx <- table(start.data$subj.id, start.data$block)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+```
+
+
+## Simulation
+
+```{r eval=FALSE, include=FALSE}
+n.simus <- 1000 # small number for testing
+r.effects <- c(1.1) # random effects to be simulated
+# with the intercept being -2.2 (qlogis(0.1)) we could make the following
+# guesses for the random intercept:
+#- 1.1: moderate random intercepts effect
+
+
+r.slope.con <- c(0.9)
+# with the intercept being -1.8 (qlogis(0.1)-qlogis(0.4)) we could make the following
+# guesses for the random slope:
+#- 0.9: moderate random slopes effect
+
+
+r.slope.trial <- 0.1
+r.slope.block <- 0.1 
+
+# create object to store the simulation parameters and results:
+all.res <- data.frame(expand.grid(
+  n.per.subject = n.per.subject, r.effect = r.effects, 
+  r.slope.con = r.slope.con, r.slope.trial = r.slope.trial, r.slope.block = r.slope.block,  
+  clear.per =  clear.per,
+  opaque.per = opaque.per,
+  simu = 1:n.simus
+))
+all.res$icpt <- NA
+all.res$conditionopaque <- NA
+all.res$re.sd <- NA
+all.res$warns.full <- NA
+all.res$warns.null <- NA
+all.res$lrt.p.con <- NA
+all.res$full.null.p <- NA
+
+all.ests=matrix(NA, nrow=n.simus, ncol=1)
+colnames(all.ests)=c("lrt.p.con")
+
+# create data frame with design:
+## done above
+
+# load packages needed:
+library(lme4)
+# Loading required package: Matrix
+library(kyotil) # we want to store info about convergence issues
+
+# define control structure to make convergence more likely:
+contr <- glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 10000))
+
+xdata <- start.data
+
+
+# run simulation
+for (i in 1:nrow(all.res)) {
+
+  set.seed(i) # allows to later replicate individual simulations
+
+  # add age  (if it should be generated in each loop)
+  age <- sample(x = age_range, size = length(unique(xdata$subj.id)), replace = T)
+  xdata$age <- as.numeric(age[as.numeric(xdata$subj.id)])
+  xdata$z.age <- scale(xdata$age)
+  m.mat <- model.matrix(object = ~condition + z.age + sex + z.trial + z.block, data = xdata) # create model martix
+
+  coefs <- c(
+  "(Intercept)" = log(all.res[i, "clear.per"] / (1 - all.res[i, "clear.per"])),
+  "conditionopaque" = log(all.res[i, "opaque.per"] / (1 - all.res[i, "opaque.per"] )) - log(all.res[i, "clear.per"] / (1 - all.res[i, "clear.per"])),
+  "z.age" = 0,
+  "sexm" = 0,
+  "z.trial" = 0,
+  "z.block" = 0
+)
+  
+  LP <- m.mat[, names(coefs)] %*% coefs # LP wrt fixed effects
+
+  # add random effect to linear predictor:
+  LP <- LP + rnorm(n = n.subject, sd = all.res[i, "r.effect"])[as.numeric(xdata$subj.id)] +
+    rnorm(n = n.subject, sd = all.res[i, "r.slope.con"])[as.numeric(xdata$subj.id)] * xdata$condition.dummy +
+    rnorm(n = n.subject, sd = all.res[i, "r.slope.trial"])[as.numeric(xdata$subj.id)] * xdata$z.trial #+
+    rnorm(n = n.subject, sd = all.res[i, "r.slope.block"])[as.numeric(xdata$subj.id)]*xdata$z.block
+
+  # generate response:
+  xdata$correct <- rbinom(n = nrow(xdata), size = 1, prob = exp(LP) / (1 + exp(LP)))
+
+  # fit full model:
+  full <- keepWarnings(glmer(correct ~ condition + z.age + sex + z.trial + z.block + (1 + condition.c + z.trial+z.block || subj.id),
+    data = xdata, family = binomial, control = contr
+  ))
+  # fit null model:
+  null <- keepWarnings(glmer(correct ~ z.trial + z.block + (1 + condition.c + z.trial+z.block || subj.id),
+    data = xdata, family = binomial, control = contr
+  ))
+
+  # store results:
+  all.res[i, c("icpt", "conditionopaque", "z.age", "sexm", "z.trial", "z.block")] <- fixef(full$value)
+  all.res[i, "re.sd"] <- as.data.frame(summary(full$value)$varcor)[1, "sdcor"]
+  all.res[i, "warns.full"] <- nchar(paste(full$warnings, collapse = ""))
+  all.res[i, "warns.null"] <- nchar(paste(null$warnings, collapse = ""))
+  all.res[i, "lrt.p.con"] <- as.data.frame(drop1(full$value, test = "Chisq"))["condition", "Pr(Chi)"]
+  all.res[i, "full.null.p"] <- as.data.frame(anova(null$value, full$value, test = "Chisq"))[2, "Pr(>Chisq)"]
+}
+
+summary(full$value)
+#save.image("power_sim_study4_N68.RData")
+```
+
+## Evaluation of results 
+
+* number of warning per combinations of random effects (out of 1000 models per cell)  
+Full model:  
+```{r echo=FALSE}
+#full model
+tapply(X=all.res[, "warns.full"]>0, INDEX=all.res[, c("r.slope.con", "r.effect")],
+FUN=sum)
+#warning codes: 
+#363: unable to evaluate scaled gradient. Model failed to converge: degenerate  Hessian with 1 negative eigenvalues
+#205: Model is nearly unidentifiable: large eigenvalue ratio - Rescale variables?
+```
+
+Null model:  
+```{r echo=FALSE}
+#null model: 
+tapply(X=all.res[, "warns.null"]>0, INDEX=all.res[, c("r.slope.con", "r.effect")],
+FUN=sum)
+```
+
+* plotting the estimates (all models)
+
+```{r echo=FALSE}
+par(mar=c(3, 3, 0.2, 0.2), mgp=c(1.7, 0.3, 0), tcl=-0.15, las=1)
+plot(
+  x = as.numeric(as.factor(rep(
+    x = c("icpt", "conditionopaque", "re.sd"),
+    each = nrow(all.res)
+  ))),
+  y = unlist(all.res[, c("icpt", "conditionopaque", "re.sd")]),
+  pch = 19, col = grey(level = 0.2, alpha = 0.2),
+  xaxt = "n", xlim = c(0.5, 3.5), ylab = "estimate", xlab = ""
+)
+mtext(text = c("icpt", "conditionopaque", "re.sd"), side = 1, at = 1:3, line = 0.2)
+```
+
+## Only models that converged are evaluated from here on:  
+
+```{r include=FALSE}
+all.res2=subset(all.res, warns.full==0)
+
+table(round(all.res2$conditionopaque))
+
+```
+
+
+### How many models converged, have a significant full-null model comparison, and a significant LRT of condition?  
+```{r echo=FALSE}
+
+lrt.data2 <- all.res2 %>%
+  filter(full.null.p<0.05)%>%
+  group_by(opaque.per, clear.per, r.effect, r.slope.con) %>%
+  summarise(condition=mean(conditionopaque),
+            z.age=mean(z.age),
+            z.block=mean(z.block),
+            sex=mean(sexm),
+            z.trial=mean(z.trial),
+            lrt.p.con.mean2 = mean(lrt.p.con), 
+            n.sign.lrt2 = length(lrt.p.con[lrt.p.con < 0.05]), 
+            n.lrt = n.simus,#length(lrt.p.con), 
+            proportion.sign.lrt2 = length(lrt.p.con[lrt.p.con < 0.05]) / n.simus)
+
+lrt.data2
+```
+
+#### Plotting the proportion of significant LRTs for the predictor variable condition ONLY based on models that converged and with a significant full-null model comparison
+
+```{r echo=FALSE}
+
+p.con.power <- ggplot(data = lrt.data2, aes(y=proportion.sign.lrt2, x=as.factor(clear.per)))+
+        geom_boxplot( aes(x=as.factor(clear.per), y=proportion.sign.lrt2, color=as.factor(opaque.per)),  width=0.3)+
+      ylim(0.0, 1)+
+  geom_hline(yintercept = 0.8, colour = "black", lwd = 1.05, lty = 3) +
+      ylab("Power") +
+      xlab("Clear condition performance") +
+   scale_color_manual(name="Opaque condition", values=c("darkorange", "dodgerblue"))+
+  
+      theme_bw()
+ p.con.power
+
+ggsave( p.con.power, filename = "Study4_power.png", scale = 0.5, height = 8, width = 9)
+```

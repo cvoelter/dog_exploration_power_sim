@@ -1,0 +1,266 @@
+---
+title: "Study 1 - expectancy violations and pupillometry - power simulation"
+author: "Christoph Völter"
+date: "16/01/2022"
+output: 
+  html_document:
+    theme: united
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(cowplot)
+library("gghalves")
+
+load("study1_expectancy_violation_power_sim_N20.RData")
+```
+
+## Generate data
+
+```{r echo=FALSE, include=FALSE}
+
+n.subject <- 20 # number subjects
+n.per.subject <- 2 # observations per subject
+n.per.condition <- 1 # observations per subject and condition
+subj.id <- as.factor(paste("subj", 1:n.subject, sep = "."))
+age_range <- c(12:130) # age range between 1 and 13 years
+congruent.per <- 0 # performance in congruent condition
+incongruent.per <- c(500) # performance in incongruent condition
+
+start.data <- data.frame(subj.id)
+# duplicate rows according to the number obs. per subject:
+start.data <- start.data[rep(x = 1:nrow(start.data), times = n.per.subject), ]
+start.data <- as.data.frame(start.data)
+names(start.data) <- "subj.id"
+
+# add condition and trial number
+start.data <- data.frame(expand.grid(subj.id = subj.id, condition = c("congruent", "incongruent"), trial = c(1:n.per.condition)))
+
+# add order
+start.data$order <- as.factor(rep(x = c("incongruent_first", "congruent_first"), times = n.subject / 2))[as.numeric(start.data$subj.id)]
+
+start.data$order2 <- ifelse((start.data$order == "incongruent_first" & start.data$condition == "incongruent") |
+  (start.data$order == "congruent_first" & start.data$condition == "congruent"), 1, 2)
+
+
+# add demographics 
+start.data$sex <- as.factor(rep(x = c("f", "m", "m", "f"), times = n.subject/4))[as.numeric(start.data$subj.id)]
+
+
+# z-transformation of covariates
+start.data$z.order <- as.vector(scale(as.numeric(start.data$order2)))
+
+# dummy code factors
+start.data$condition.dummy <- as.numeric(start.data$condition == levels(start.data$condition)[2])
+
+
+# center condition for random slopes:
+start.data$condition.c <- as.numeric(start.data$condition) - mean(as.numeric(start.data$condition))
+
+# checks:
+# does each subject have only one sex and age?
+xx <- table(start.data$subj.id, start.data$sex)
+range(apply(X = xx > 0, MARGIN = 1, sum)) # should be 1 and 1
+
+xx <- table(start.data$order, start.data$sex)
+range(apply(X = xx > 0, MARGIN = 1, sum)) # should be 1 and 1
+
+xx <- table(start.data$subj.id, start.data$condition)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+
+xx <- table(start.data$condition, start.data$order)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+
+xx <- table(start.data$subj.id, start.data$order)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+```
+
+
+## Simulation
+
+Test
+```{r eval=FALSE, include=FALSE}
+n.simus <- 1000 # small number for testing
+resid.sd=500#residual standard deviation
+subj.sd=500#random effect of individual
+ran.slope.sd= 250#random slope effect (standard deviation)
+icpt=congruent.per#intercept
+sex.effect=0
+order.effect=0
+age.effect=0
+
+xdata<-start.data
+tot.n=nrow(xdata)#total n
+m.mat=model.matrix(object=~condition+sex+order, data=xdata)
+coefs=c("(Intercept)"=icpt, "conditionincongruent"=incongruent.per,  "sexm"=sex.effect, "orderincongruent_first"=order.effect)
+#fixed effect and random slope of food availability:
+#rnorm(n=n.subject, sd=ran.slope.sd)[as.numeric(subj.id)]*xdata$condition.c+ # random slope not identifiable
+rv=m.mat[, names(coefs)]%*%coefs+#fixed effects
+rnorm(n=n.subject, sd=subj.sd)[as.numeric(subj.id)]+#random effect of subj.
+rnorm(n=tot.n, sd=resid.sd)#residual variation
+
+#plotting
+par(mar=c(2.7, 2.7, 0.2, 0.2), mgp=c(1.5, 0.3, 0),
+tcl=-0.15, las=1, cex.lab=0.7, cex.axis=0.5)
+plot(xdata$condition, rv)
+
+library(lme4)
+full=lmer(rv~condition+sex+order+(1|subj.id), data=xdata, REML=F)
+summary(full)
+drop1(full, test="Chisq")
+```
+
+Actual simulation
+```{r eval=FALSE, include=FALSE}
+n.simus <- 1000 # small number for testing
+tot.n=nrow(xdata)#total n
+resid.sd=350#residual standard deviation
+subj.sd=500#random effect of individual
+ran.slope.sd= 250#random slope effect (standard deviation)
+icpt=congruent.per#intercept
+sex.effect=0
+order.effect=0
+age.effect=0
+
+# create object to store the simulation parameters and results:
+all.res <- data.frame(expand.grid(
+  n.subject = n.subject, r.effect = subj.sd, resid.sd=resid.sd, 
+  incongruent.per = incongruent.per, congruent.per = congruent.per,
+  simu = 1:n.simus
+))
+all.res$icpt <- NA
+all.res$conditionincongruent <- NA
+all.res$re.sd <- NA
+all.res$warns.full <- NA
+all.res$warns.null <- NA
+all.res$lrt.p.con <- NA
+all.res$full.null.p <- NA
+
+all.ests=matrix(NA, nrow=n.simus, ncol=1)
+colnames(all.ests)=c("lrt.p.con")
+
+# create data frame with design:
+## done above
+
+# load packages needed:
+library(lme4)
+# Loading required package: Matrix
+library(kyotil) # we want to store info about convergence issues
+
+# define control structure to make convergence more likely:
+contr <- lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 10000))
+
+xdata <- start.data
+
+# run simulation
+for (i in 1:nrow(all.res)) {
+  set.seed(i) # allows to later replicate individual simulations
+
+
+
+  # add age  (if it should be generated in each loop)
+   age <- sample(x = age_range, size = length(unique(xdata$subj.id)), replace = T)
+   xdata$age <- as.numeric(age[as.numeric(xdata$subj.id)])
+   xdata$z.age <- scale(as.numeric(xdata$age))
+
+     m.mat <- model.matrix(object = ~condition + z.age + sex + order, data = xdata) # create model martix
+
+       coefs <- c(
+  "(Intercept)" = congruent.per,
+  "conditionincongruent" = incongruent.per,
+  "z.age" = 0,
+  "sexm" = 0,
+  "orderincongruent_first" = 0
+    )
+    # generate response:
+xdata$rv=m.mat[, names(coefs)]%*%coefs+#fixed effects
+rnorm(n=n.subject, sd=subj.sd)[as.numeric(subj.id)]+#random effect of subj.
+rnorm(n=tot.n, sd=resid.sd)#residual variation
+
+  # fit full model:
+  full <- keepWarnings(lmer(rv ~ condition + z.age + sex +  order + (1 |subj.id),
+    data = xdata, REML=FALSE, control = contr
+  ))
+  # fit null model:
+  null <- keepWarnings(lmer(rv ~order + (1 |subj.id),
+    data = xdata, REML=FALSE, control = contr
+  ))
+
+  # store results:
+  all.res[i, c("(Intercept)", "conditionincongruent", "z.age", "sexm",  "orderincongruent_first")] <- fixef(full$value)
+  all.res[i, "re.sd"] <- as.data.frame(summary(full$value)$varcor)[1, "sdcor"]
+  all.res[i, "warns.full"] <- nchar(paste(full$warnings, collapse = ""))
+  all.res[i, "warns.null"] <- nchar(paste(null$warnings, collapse = ""))
+  all.res[i, "lrt.p.con"] <- as.data.frame(drop1(full$value, test = "Chisq"))["condition", "Pr(Chi)"]
+  all.res[i, "full.null.p"] <- as.data.frame(anova(null$value, full$value, test = "Chisq"))[2, "Pr(>Chisq)"]
+}
+
+
+save.image("study1_expectancy_violation_power_sim_N20.RData")
+```
+
+## Evaluation of results 
+
+* number of warning per combinations of random effects (out of 1000 models per cell)  
+Full model:  
+```{r echo=FALSE}
+#full model
+tapply(X=all.res[, "warns.full"]>0, INDEX=all.res[, c("congruent.per", "incongruent.per")],
+FUN=sum)
+#warning codes: 
+#363: unable to evaluate scaled gradient. Model failed to converge: degenerate  Hessian with 1 negative eigenvalues
+#205: Model is nearly unidentifiable: large eigenvalue ratio - Rescale variables?
+```
+
+Null model:  
+```{r echo=FALSE}
+#null model: 
+tapply(X=all.res[, "warns.null"]>0, INDEX=all.res[, c("congruent.per", "incongruent.per")],
+FUN=sum)
+```
+
+* plotting the estimates (all models)
+
+```{r echo=FALSE}
+par(mar=c(3, 3, 0.2, 0.2), mgp=c(1.7, 0.3, 0), tcl=-0.15, las=1)
+plot(
+  x = as.numeric(as.factor(rep(
+    x = c("(Intercept)", "conditionincongruent", "re.sd"),
+    each = nrow(all.res)
+  ))),
+  y = unlist(all.res[, c("(Intercept)", "conditionincongruent", "re.sd")]),
+  pch = 19, col = grey(level = 0.2, alpha = 0.2),
+  xaxt = "n", xlim = c(0.5, 3.5), ylab = "estimate", xlab = ""
+)
+mtext(text = c("(Intercept)", "conditionincongruent", "re.sd"), side = 1, at = 1:3, line = 0.2)
+```
+
+## Only models that converged are evaluated from here on:  
+
+```{r include=FALSE}
+all.res2=subset(all.res, warns.full==0)
+
+table(round(all.res2$conditionincongruent))
+
+```
+
+
+### How many models converged, have a significant full-null model comparison, and a significant LRT of condition?  
+```{r echo=FALSE}
+
+lrt.data2 <- all.res2 %>%
+  filter(full.null.p<0.05)%>%
+  group_by(incongruent.per, congruent.per) %>%
+  summarise(lrt.p.con.mean2 = mean(lrt.p.con), 
+            n.sign.lrt2 = length(lrt.p.con[lrt.p.con < 0.05]), 
+            n.lrt = n.simus,#length(lrt.p.con), 
+            proportion.sign.lrt2 = length(lrt.p.con[lrt.p.con < 0.05]) / n.simus)
+
+lrt.data2
+```
+
+

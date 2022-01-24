@@ -1,0 +1,264 @@
+---
+title: "Study 4 - Overhypothesis - binomial GLMM"
+author: "Christoph Völter"
+date: "19/01/2022"
+output: 
+  html_document:
+    theme: united
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(tidyverse)
+library(cowplot)
+library("gghalves")
+library(ggthemes)
+
+#load(".RData")
+```
+
+## Generate data
+
+```{r echo=FALSE, include=FALSE}
+set.seed(1)
+n.subject <- 48 # number subjects
+n.per.subject <- 10 # observations per subject
+n.per.condition <- 10 # observations per subject and condition
+subj.id <- as.factor(paste("subj", str_pad(1:n.subject, 2, pad = "0"), sep = "."))
+age_range <- c(12:130) # age range between 7 and 40
+test.per <- c(0.3, 0.4) # performance in uniform condition
+control.per <- c(0.7, 0.8) # performance in mixed condition
+
+start.data <- data.frame(subj.id)
+# duplicate rows according to the number obs. per subject:
+start.data <- start.data[rep(x = 1:nrow(start.data), times = n.per.subject), ]
+start.data <- as.data.frame(start.data)
+names(start.data) <- "subj.id"
+
+# add condition and trial number
+xdata <- data.frame(expand.grid(condition=c("control", "test"), sex=c("f", "m")))
+start.data <- data.frame(subj.id)
+start.data<-cbind(start.data, xdata)
+start.data<-start.data%>%arrange(subj.id)
+#start.data$trial=rep(seq(1:10), n.subject)
+
+
+# z-transformation of covariates
+#start.data$z.trial <- as.vector(scale(as.numeric(start.data$trial)))
+
+```
+
+
+```{r echo=FALSE, include=FALSE}
+# checks:
+xx <- table(start.data$subj.id, start.data$condition)
+range(apply(X = xx > 0, MARGIN = 1, sum))
+
+#xx <- table(start.data$condition, start.data$trial)
+#range(apply(X = xx > 0, MARGIN = 1, sum))
+
+#xx <- table(start.data$subj.id, start.data$trial)
+#range(apply(X = xx > 0, MARGIN = 1, sum))
+
+```
+
+
+## Simulation
+
+```{r eval=FALSE, include=FALSE}
+n.simus <- 1000 # small number for testing
+r.effects <- c(1.386294) # random effects to be simulated
+# with the intercept being -1.386294 (qlogis(0.2)) we assume a moderately large random intercept of 1.386294.
+
+# create object to store the simulation parameters and results:
+all.res <- data.frame(expand.grid(
+  n.per.subject = n.per.subject, r.effect = r.effects,
+  control.per = control.per,
+  test.per = test.per,
+  simu = 1:n.simus
+))
+all.res$icpt <- NA
+all.res$conditiontest <- NA
+all.res$re.sd <- NA
+all.res$warns.full <- NA
+all.res$warns.null <- NA
+all.res$lrt.p.con <- NA
+all.res$lrt.p.age <- NA
+all.res$lrt.p.sex <- NA
+all.res$full.null.p <- NA
+
+all.ests <- matrix(NA, nrow = n.simus, ncol = 1)
+colnames(all.ests) <- c("lrt.p.con")
+
+# create data frame with design:
+## done above
+
+# load packages needed:
+library(lme4)
+# Loading required package: Matrix
+library(kyotil) # we want to store info about convergence issues
+
+# define control structure to make convergence more likely:
+contr <- glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1000000))
+
+xdata <- start.data
+
+# run simulation
+for (i in 1:nrow(all.res)) {
+  set.seed(i) # allows to later replicate individual simulations
+
+  # add age  (if it should be generated in each loop)
+  age <- sample(x = age_range, size = length(unique(xdata$subj.id)), replace = T)
+  xdata$age <- as.numeric(age[as.numeric(xdata$subj.id)])
+  xdata$z.age <- scale(xdata$age)
+
+  m.mat <- model.matrix(object = ~ condition + sex + z.age, data = xdata) # create model martix
+
+  coefs <- c(
+    "(Intercept)" = qlogis(all.res[i, "control.per"]),
+    "conditiontest" = log(all.res[i, "test.per"] / (1 - all.res[i, "test.per"])) - log(all.res[i, "control.per"] / (1 - all.res[i, "control.per"])),
+    "sexm" = 0,
+    "z.age" = 0
+  )
+
+  LP <- m.mat[, names(coefs)] %*% coefs # LP wrt fixed effects
+
+  # add random effect to linear predictor:
+  LP <- LP + rnorm(n = n.subject, sd = all.res[i, "r.effect"])[as.numeric(xdata$subj.id)]
+
+  # generate response:
+  xdata$correct <- rbinom(n = nrow(xdata), size = n.per.condition, prob = exp(LP) / (1 + exp(LP)))
+
+  xdata$rv <- cbind(xdata$correct, n.per.condition - xdata$correct)
+
+  # fit full model:
+  full <- keepWarnings(glmer(rv ~ condition + sex + z.age + (1 | subj.id),
+    data = xdata, family = binomial, control = contr
+  ))
+  # fit null model:
+  null <- keepWarnings(glmer(rv ~ 1 + (1 | subj.id),
+    data = xdata, family = binomial, control = contr
+  ))
+  # store results:
+  all.res[i, c("icpt", "conditiontest", "sexm", "z.age")] <- fixef(full$value)
+  all.res[i, "re.sd"] <- as.data.frame(summary(full$value)$varcor)[1, "sdcor"]
+  all.res[i, "warns.full"] <- nchar(paste(full$warnings, collapse = ""))
+  all.res[i, "warns.null"] <- nchar(paste(null$warnings, collapse = ""))
+  all.res[i, "lrt.p.con"] <- as.data.frame(drop1(full$value, test = "Chisq"))["condition", "Pr(Chi)"]
+  all.res[i, "lrt.p.sex"] <- as.data.frame(drop1(full$value, test = "Chisq"))["sex", "Pr(Chi)"]
+  all.res[i, "lrt.p.age"] <- as.data.frame(drop1(full$value, test = "Chisq"))["z.age", "Pr(Chi)"]
+  all.res[i, "full.null.p"] <- as.data.frame(anova(null$value, full$value, test = "Chisq"))[2, "Pr(>Chisq)"]
+  print(i)
+}
+
+
+
+
+save.image("overhypothesis_simulation_N48.RData")
+```
+
+
+```{r}
+ggplot(xdata, aes(x=condition, y=correct))+
+  geom_boxplot()
+```
+
+
+## Evaluation of results 
+
+* number of warning per combinations of random effects (out of 1000 models per cell)  
+Full model:  
+```{r echo=FALSE}
+#full model
+tapply(X=all.res[, "warns.full"]>0, INDEX=all.res[, c("control.per", "test.per")],
+FUN=sum)
+#warning codes: 
+#363: unable to evaluate scaled gradient. Model failed to converge: degenerate  Hessian with 1 negative eigenvalues
+#205: Model is nearly unidentifiable: large eigenvalue ratio - Rescale variables?
+```
+
+
+## Only models that converged are evaluated from here on:  
+
+```{r include=FALSE}
+all.res2=subset(all.res, warns.full==0)
+```
+
+
+### How many models converged, have a significant full-null model comparison, and a significant LRT of condition?  
+```{r echo=FALSE}
+n.converged<- all.res2%>%
+    group_by(test.per,control.per ) %>%
+  summarise(n.converged=length(lrt.p.con))
+
+
+lrt.data2 <- all.res2 %>%
+  #filter(full.null.p<0.05)%>%
+  group_by(test.per, control.per, r.effect ) %>%
+  summarise(lrt.p.con.median = median(lrt.p.con), 
+            lrt.p.sex.median = median(lrt.p.sex),
+            lrt.p.age.median = median(lrt.p.age),
+            n.sign.lrt.con = length(lrt.p.con[lrt.p.con < 0.05]),
+            n.sign.lrt.sex = length(lrt.p.sex[lrt.p.sex < 0.05]),
+            n.sign.lrt.age = length(lrt.p.age[lrt.p.age < 0.05]),
+            n.lrt = n.simus,
+            proportion.sign.lrt.con = length(lrt.p.con[lrt.p.con < 0.05]) / n.simus,
+            proportion.sign.lrt.sex = length(lrt.p.sex[lrt.p.sex < 0.05]) / n.simus,
+            proportion.sign.lrt.age = length(lrt.p.age[lrt.p.age < 0.05]) / n.simus)%>%
+  full_join(n.converged)
+
+lrt.data2
+```
+
+#### Plotting the proportion of significant LRTs for the predictor variable condition ONLY based on models that converged and with a significant full-null model comparison
+
+```{r echo=FALSE}
+p.con.power <- ggplot(data = lrt.data2, aes(x= as.factor(test.per),y = proportion.sign.lrt.con, fill=as.factor(control.per))) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_y_continuous(breaks=seq(0,1,0.2), limits=c(0, 1))+
+  geom_hline(yintercept = 0.8, colour = "black", lwd = 1.1, lty = 2) +
+   # geom_hline(yintercept = 0.05, colour = "darkgrey", lwd = 1.1, lty = 4) +
+  scale_fill_manual(values=c("dodgerblue", "darkorange"))+
+  labs(fill = "Control condition", y="Power", x= "Test condition") +
+  theme_few()#+
+  #theme(legend.position="none")
+p.con.power
+
+#ggsave(p.con.power, filename = "graphics/ExplSeek_power_glmm_cbind_30sub.png", scale = 0.8, height = 5, width = 5)
+```
+
+
+#### Plotting the fixed effect of condition
+
+```{r echo=FALSE}
+p.con <- ggplot(data = all.res2, aes(x= as.factor(test.per), fill=as.factor(control.per)))  +
+  geom_jitter(data = all.res2, aes(x = as.factor(test.per), y = conditiontest, color = as.factor(control.per)), size = 1.5, position = position_jitterdodge(dodge.width = 0.8, jitter.width = 0.5), alpha = .1) +
+  scale_color_manual(values = c("dodgerblue", "darkorange")) +#, name = "control condition"
+  scale_fill_manual(values = c("dodgerblue", "darkorange")) +#, name = "control condition"
+    geom_boxplot(data = all.res2 %>% filter(control.per == "0.2"), aes(x = as.factor(test.per), y = conditiontest), position = position_nudge(x = -.2), width = 0.3, alpha = 0.5, outlier.colour = "white") +
+  geom_boxplot(data = all.res2 %>% filter(control.per == "0.3"), aes(x = as.factor(test.per), y = conditiontest), position = position_nudge(x = .2), width = 0.3, alpha = 0.5, outlier.colour = "white") +
+  #geom_hline(data = data.frame(test.per = "0.7"), aes(yintercept = coefs["conditiontest"]), colour = "black", lwd = 1.1, lty = 2, alpha = 0.7) +
+  geom_segment( aes(x=2, xend=2.4, y = qlogis(0.4) - qlogis(0.8), yend = qlogis(0.4) - qlogis(0.8)), colour = "red", lwd = 1, lty = 4, alpha = 0.7) +
+    geom_segment( aes(x=1.6, xend=2, y = qlogis(0.4) - qlogis(0.7), yend = qlogis(0.4) - qlogis(0.7)), colour = "red", lwd = 1, lty = 2, alpha = 0.7) +
+    geom_segment( aes(x=0.6, xend=1, y = qlogis(0.3) - qlogis(0.7), yend = qlogis(0.3) - qlogis(0.7) ), colour = "red", lwd = 1, lty = 2, alpha = 0.7) +
+    geom_segment( aes(x=1, xend=1.4, y = qlogis(0.3) - qlogis(0.8), yend = qlogis(0.3) - qlogis(0.8) ), colour = "red", lwd = 1, lty = 4, alpha = 0.7) +
+  ylab("Condition (fixed effect)") +
+  xlab("Test condition") +
+  theme_few() +
+  guides(color = FALSE)+
+  labs(fill = "Control condition")
+  #theme(legend.title = element_blank())+
+ # theme(legend.position = "none")
+
+p.con
+```
+
+```{r}
+
+pg<-plot_grid(p.con, p.con.power, nrow=1, labels=c("A", "B"))
+ggsave(pg, filename = "overhypothesis_estimates_power.png", width=15, height=5, scale=0.85)
+```
