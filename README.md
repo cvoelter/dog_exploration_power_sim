@@ -7,7 +7,7 @@
 | 2     | first choice of target object           | binomial        | incongruent: 0.67      | congruent: 0.33       |        | 68 | 0.83  | between | glm(resp~condition + sex +z.age, family=binomial)                                                         |
 | 3     | number of searched cups in first set    | binomial        | uniform: 3 / 10 lifted | mixed: 7 / 10 lifted  |        | 48 | 0.94  | between | glmer(cbind(lift, not-lifted)~condition + sex +z.age+(1|subject), family=binomial)                        |
 | 4     | information seeking (yes / no)          | binomial        | opaque:  0.35          | clear:  0.2           |        | 68 | 0.99  | within  | glmer(resp~condition + sex +z.age+z.block+z.trial+(1+condition+z.block+z.trial|subject), family=binomial) |
-|  5/6  | proportion looking time to unseen space | beta            | toy / emotional: 0.4   | no-toy / neutral: 0.2 |        | 32 | 0.94  | between | glm(resp~condition + sex +z.age, family=beta)                                                             |
+|  5/6  | proportion looking time to unseen space | beta            | toy / positive: 0.4   | no-toy / control: 0.2 |        | 32 | 0.94  | between | glm(resp~condition + sex +z.age, family=beta)                                                             |
 
 ## Structure 
 
