@@ -17,7 +17,7 @@ library(tidyverse)
 library(cowplot)
 library("gghalves")
 
-load("power_sim_study4_N68.RData.RData")
+load("power_sim_study4_N68.RData")
 ```
 
 ## Generate data
